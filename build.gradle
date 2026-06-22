@@ -49,7 +49,7 @@ configurations {
 }
 
 dependencies {
-    runtimeCheckerOnly projects.runtimeEnvironmentCheck
+    runtimeCheckerOnly project(':runtime-environment-check')
 
     // Static Analysis
     api libs.annotations.jspecify
@@ -93,7 +93,7 @@ tasks.named('shadowJar', ShadowJar) {
 
     minimize()
     dependencies {
-        exclude dependency(projects.runtimeEnvironmentCheck)
+        exclude dependency(rootProject.project(':runtime-environment-check'))
         exclude dependency(libs.annotations.jspecify)
     }
 }
