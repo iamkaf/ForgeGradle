@@ -27,6 +27,7 @@ abstract class SlimeLauncherMetadata extends DefaultTask implements ForgeGradleT
         var taskName = "slimeLauncherMetadataFor" + Util.dependencyToCamelCase(mcdep.getModule());
         return project.getTasks().register(taskName, SlimeLauncherMetadata.class, task -> {
             task.setDescription("Extracts the Slime Launcher metadata for '%s'.".formatted(mcdep.toString()));
+            task.dependsOn(((MavenizerInstanceImpl)mcdep.getMavenizerInstance()).getTaskProvider());
             task.getMetadata().setFrom(mcdep.getMetadataDependency());
         });
     }

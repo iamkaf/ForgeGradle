@@ -411,100 +411,166 @@ abstract class MinecraftExtensionImpl implements MinecraftExtensionInternal {
             var minecraftDependency = this.getObjects().newInstance(MinecraftDependencyImpl.class, name);
             this.minecraftDependencies.add(minecraftDependency);
             var dep = minecraftDependency.init(value, closure);
-            var outputJson = this.plugin.rootProjectDirectory().file(".gradle/mavenizer/dependencies/" + name + ".json").get().getAsFile();
+            var outputJson = this.plugin.rootProjectDirectory()
+                .file(".gradle/mavenizer/dependencies/" + mavenizerOutputName(getProject(), name) + ".json");
+            var outputArtifact = this.getMavenizerOutput().file(mavenizerArtifactPath(dep));
+            var tool = this.plugin.getTool(Tools.MAVENIZER);
+            var toolVersion = new ComparableVersion(tool.getModule().getVersion());
+            var maxHeapSize = this.getProviders()
+                .gradleProperty("net.minecraftforge.gradle.mavenizer.maxHeap")
+                .orElse("768m");
+            var decompileMemory = this.getProviders()
+                .gradleProperty("net.minecraftforge.gradle.mavenizer.decompileMemory")
+                .orElse("auto");
+            var maxParallelUsages = this.getProviders()
+                .gradleProperty("net.minecraftforge.gradle.mavenizer.maxParallel")
+                .map(Integer::parseInt)
+                .orElse(4);
+            var mavenizerService = getProject().getGradle().getSharedServices().registerIfAbsent(
+                "forgeGradleMavenizer",
+                MavenizerBuildService.class,
+                spec -> spec.getMaxParallelUsages().set(maxParallelUsages)
+            );
+            var mavenizerArguments = this.getProviders().provider(() -> {
+                var toolCache = this.plugin.globalCaches()
+                    .dir(tool.getName().toLowerCase(Locale.ENGLISH))
+                    .map(this.problems.ensureFileLocation());
+                var cache = toolCache.get().dir("caches").getAsFile().getAbsolutePath();
+
+                var localToolCache = this.plugin.localCaches()
+                    .dir(tool.getName().toLowerCase(Locale.ENGLISH))
+                    .map(this.problems.ensureFileLocation());
+
+                var ret = new ArrayList<>(List.of(
+                    "--maven",
+                    "--cache", cache,
+                    "--jdk-cache", cache,
+                    "--output", this.getMavenizerOutput().get().getAsFile().getAbsolutePath(),
+                    "--artifact", dep.getModule().toString(),
+                    "--version", Objects.requireNonNull(dep.getVersion()),
+                    "--global-auxiliary-variants",
+                    "--output-json", outputJson.get().getAsFile().getAbsolutePath()
+                ));
+
+                if (getProject().getGradle().getStartParameter().isRefreshDependencies())
+                    ret.add("--ignore-cache");
+
+                // If we are finding the access transformer from sourcesets, just find from any source set
+                // We can't filter by configurations because the config cache doesn't like that.
+                // So if users fuck up, then we can output a warning, or they can manually set the AT file.
+                // This is a 'best effort'
+                var sourceSets = getProject().getExtensions().getByType(JavaPluginExtension.class).getSourceSets();
+                minecraftDependency.finalizeAccessTransformers(sourceSets);
+
+                for (var at : minecraftDependency.getAccessTransformer()) {
+                    //System.out.println("Access Transformer: " + at);
+                    ret.add("--access-transformer");
+                    ret.add(at.getAbsolutePath());
+                }
+
+                var mappings = minecraftDependency.getMappings();
+                if ("parchment".equals(mappings.getChannel()))
+                    ret.addAll(List.of("--parchment", Objects.requireNonNull(mappings.getVersion())));
+                else if (!"auto".equals(mappings.getChannel())) {
+                    ret.add("--mappings");
+                    if (mappings.getVersion() == null)
+                        ret.add(mappings.getChannel());
+                    else
+                        ret.add(mappings.getChannel() + ':' + mappings.getVersion());
+                }
+
+                for (var repo : this.getRepositories()) {
+                    if (MAVENIZER_REPO_NAME.equals(repo.getName()))
+                        continue;
+                    var url = repo.getUrl().toString();
+                    if (!url.endsWith("/"))
+                        url += '/';
+                    ret.add("--repository");
+                    ret.add(repo.getName() + ',' + url);
+                }
+
+                if (!minecraftDependency.getFacade().isEmpty()) {
+                    if (toolVersion.compareTo(Constants.Mavenizer.SUPPORTS_FACADES) < 0) {
+                        problems.reportFacadesNotSupported(tool.getModule().toString());
+                    } else {
+                        for (var cfg : minecraftDependency.getFacade()) {
+                            ret.add("--facade-config");
+                            ret.add(cfg.getAbsolutePath());
+                        }
+                    }
+                }
+
+                if (toolVersion.compareTo(Constants.Mavenizer.SUPPORTS_LOCAL_CACHE) >= 0) {
+                    ret.add("--local-cache");
+                    ret.add(localToolCache.get().getAsFile().getAbsolutePath());
+                }
+
+                var decompileMemoryValue = mavenizerDecompileMemory(dep, decompileMemory.get());
+                if (!decompileMemoryValue.isBlank()) {
+                    ret.add("--decompile-memory");
+                    ret.add(decompileMemoryValue);
+                }
+
+                // Make sure to do this at the very end
+                ret.addAll(minecraftDependency.getMavenizerArguments().getOrElse(Collections.emptyList()));
+
+                return ret;
+            });
 
             var mavenizer = this.getProviders().of(MavenizerValueSource.class, spec -> {
                 spec.parameters(params -> {
-                    var tool = this.plugin.getTool(Tools.MAVENIZER);
-                    var toolVersion = new ComparableVersion(tool.getModule().getVersion());
                     params.getClasspath().setFrom(tool.getClasspath());
                     params.getJavaLauncher().set(tool.getJavaLauncher().map(JavaLauncher::getExecutablePath));
-                    params.getArguments().set(this.getProviders().provider(() -> {
-                        var toolCache = this.plugin.globalCaches()
-                            .dir(tool.getName().toLowerCase(Locale.ENGLISH))
-                            .map(this.problems.ensureFileLocation());
-                        var cache = toolCache.get().dir("caches").getAsFile().getAbsolutePath();
-
-                        var localToolCache = this.plugin.localCaches()
-                            .dir(tool.getName().toLowerCase(Locale.ENGLISH))
-                            .map(this.problems.ensureFileLocation());
-
-                        var ret = new ArrayList<>(List.of(
-                            "--maven",
-                            "--cache", cache,
-                            "--jdk-cache", cache,
-                            "--output", this.getMavenizerOutput().get().getAsFile().getAbsolutePath(),
-                            "--artifact", dep.getModule().toString(),
-                            "--version", Objects.requireNonNull(dep.getVersion()),
-                            "--global-auxiliary-variants",
-                            "--output-json", outputJson.getAbsolutePath()
-                        ));
-
-                        if (getProject().getGradle().getStartParameter().isRefreshDependencies())
-                            ret.add("--ignore-cache");
-
-                        // If we are finding the access transformer from sourcesets, just find from any source set
-                        // We can't filter by configurations because the config cache doesn't like that.
-                        // So if users fuck up, then we can output a warning, or they can manually set the AT file.
-                        // This is a 'best effort'
-                        var sourceSets = getProject().getExtensions().getByType(JavaPluginExtension.class).getSourceSets();
-                        minecraftDependency.finalizeAccessTransformers(sourceSets);
-
-                        for (var at : minecraftDependency.getAccessTransformer()) {
-                            //System.out.println("Access Transformer: " + at);
-                            ret.add("--access-transformer");
-                            ret.add(at.getAbsolutePath());
-                        }
-
-                        var mappings = minecraftDependency.getMappings();
-                        if ("parchment".equals(mappings.getChannel()))
-                            ret.addAll(List.of("--parchment", Objects.requireNonNull(mappings.getVersion())));
-                        else if (!"auto".equals(mappings.getChannel())) {
-                            ret.add("--mappings");
-                            if (mappings.getVersion() == null)
-                                ret.add(mappings.getChannel());
-                            else
-                                ret.add(mappings.getChannel() + ':' + mappings.getVersion());
-                        }
-
-                        for (var repo : this.getRepositories()) {
-                            if (MAVENIZER_REPO_NAME.equals(repo.getName()))
-                                continue;
-                            var url = repo.getUrl().toString();
-                            if (!url.endsWith("/"))
-                                url += '/';
-                            ret.add("--repository");
-                            ret.add(repo.getName() + ',' + url);
-                        }
-
-                        if (!minecraftDependency.getFacade().isEmpty()) {
-                            if (toolVersion.compareTo(Constants.Mavenizer.SUPPORTS_FACADES) < 0) {
-                                problems.reportFacadesNotSupported(tool.getModule().toString());
-                            } else {
-                                for (var cfg : minecraftDependency.getFacade()) {
-                                    ret.add("--facade-config");
-                                    ret.add(cfg.getAbsolutePath());
-                                }
-                            }
-                        }
-
-                        if (toolVersion.compareTo(Constants.Mavenizer.SUPPORTS_LOCAL_CACHE) >= 0) {
-                            ret.add("--local-cache");
-                            ret.add(localToolCache.get().getAsFile().getAbsolutePath());
-                        }
-
-                        // Make sure to do this at the very end
-                        ret.addAll(minecraftDependency.getMavenizerArguments().getOrElse(Collections.emptyList()));
-
-                        return ret;
-                    }));
+                    params.getMainClass().set(tool.getMainClass());
+                    params.getArguments().set(mavenizerArguments);
+                    params.getMaxHeapSize().set(maxHeapSize);
                 });
             });
 
-            var instance = new MavenizerInstanceImpl(this, mavenizer, dep, outputJson);
+            var task = getProject().getTasks().register("mavenize" + Util.dependencyToCamelCase(dep.getModule()), MavenizerTask.class, t -> {
+                t.setDescription("Generates the Mavenizer repository entries for '%s'.".formatted(dep));
+                t.getClasspath().setFrom(tool.getClasspath());
+                t.getJavaLauncher().set(tool.getJavaLauncher().map(JavaLauncher::getExecutablePath));
+                t.getMainClass().set(tool.getMainClass());
+                t.getArguments().set(mavenizerArguments);
+                t.getMaxHeapSize().set(maxHeapSize);
+                t.getOutputJson().set(outputJson);
+                t.getOutputArtifact().set(outputArtifact);
+                t.getMavenizerService().set(mavenizerService);
+            });
+
+            var instance = new MavenizerInstanceImpl(this, mavenizer, task, dep, outputJson);
             if (this.mavenizerRegistry.put(name, instance) != null)
                 problems.reportDuplicateMavenizerNames(name);
             return instance;
+        }
+
+        private static String mavenizerOutputName(Project project, String name) {
+            var projectPath = project.getPath().replace(':', '/');
+            if (projectPath.startsWith("/"))
+                projectPath = projectPath.substring(1);
+            if (projectPath.isBlank())
+                projectPath = "root";
+            return projectPath + '/' + name.replaceAll("[^A-Za-z0-9_.-]", "_");
+        }
+
+        private static String mavenizerArtifactPath(ExternalModuleDependency dependency) {
+            var module = dependency.getModule();
+            var version = Objects.requireNonNull(dependency.getVersion());
+            return module.getGroup().replace('.', '/') + '/' +
+                module.getName() + '/' +
+                version + '/' +
+                module.getName() + '-' + version + ".jar";
+        }
+
+        private static String mavenizerDecompileMemory(ExternalModuleDependency dependency, String configuredValue) {
+            if (!"auto".equalsIgnoreCase(configuredValue))
+                return configuredValue;
+
+            var version = Objects.requireNonNull(dependency.getVersion());
+            var separator = version.indexOf('-');
+            var minecraftVersion = separator < 0 ? version : version.substring(0, separator);
+            return minecraftVersion.equals("1.21.9") || minecraftVersion.startsWith("26.") ? "4352m" : "4G";
         }
 
         @Override

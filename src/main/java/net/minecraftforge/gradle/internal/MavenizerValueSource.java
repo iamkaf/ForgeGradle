@@ -9,6 +9,7 @@ import org.gradle.api.file.RegularFileProperty;
 import org.gradle.api.logging.Logger;
 import org.gradle.api.logging.Logging;
 import org.gradle.api.provider.ListProperty;
+import org.gradle.api.provider.Property;
 import org.gradle.api.provider.ValueSource;
 import org.gradle.api.provider.ValueSourceParameters;
 import org.gradle.process.ExecOperations;
@@ -20,7 +21,9 @@ abstract class MavenizerValueSource implements ValueSource<Boolean, MavenizerVal
     interface Parameters extends ValueSourceParameters {
         ConfigurableFileCollection getClasspath();
         RegularFileProperty getJavaLauncher();
+        Property<String> getMainClass();
         ListProperty<String> getArguments();
+        Property<String> getMaxHeapSize();
     }
 
     private final ExecOperations execOps;
@@ -34,11 +37,38 @@ abstract class MavenizerValueSource implements ValueSource<Boolean, MavenizerVal
     @Override
     @Nullable
     public Boolean obtain() {
+        var maxAttempts = 3;
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                execOnce();
+                return false;
+            } catch (RuntimeException e) {
+                last = e;
+                if (attempt == maxAttempts)
+                    break;
+
+                LOGGER.warn("Mavenizer failed on attempt {}/{}. Retrying.", attempt, maxAttempts, e);
+                try {
+                    Thread.sleep(1_000L * attempt);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException(interrupted);
+                }
+            }
+        }
+
+        throw last;
+    }
+
+    private void execOnce() {
         this.execOps.javaexec(spec -> {
             var params = this.getParameters();
             spec.setClasspath(params.getClasspath());
             spec.setExecutable(params.getJavaLauncher().get());
+            spec.getMainClass().set(params.getMainClass());
             spec.setArgs(params.getArguments().get());
+            spec.setMaxHeapSize(params.getMaxHeapSize().get());
 
             LOGGER.info("Executing Mavenizer: ");
             var itr = params.getClasspath().iterator();
@@ -61,6 +91,5 @@ abstract class MavenizerValueSource implements ValueSource<Boolean, MavenizerVal
                 prefix = "             ";
             }
         }).rethrowFailure().assertNormalExitValue();
-        return false;
     }
 }

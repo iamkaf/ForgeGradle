@@ -26,6 +26,7 @@ import org.gradle.api.model.ObjectFactory;
 import org.gradle.api.plugins.ExtensionAware;
 import org.gradle.api.provider.ListProperty;
 import org.gradle.api.provider.Property;
+import org.gradle.api.provider.Provider;
 import org.gradle.api.tasks.SourceSet;
 import org.gradle.api.tasks.TaskProvider;
 import org.jspecify.annotations.Nullable;
@@ -33,7 +34,9 @@ import org.jspecify.annotations.Nullable;
 import javax.inject.Inject;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Objects;
+import java.util.Set;
 
 abstract class MinecraftDependencyImpl implements MinecraftDependencyInternal {
     // These can be nullable due to configuration caching.
@@ -47,6 +50,7 @@ abstract class MinecraftDependencyImpl implements MinecraftDependencyInternal {
     private @Nullable Configuration metadataConfig;
     private @Nullable Configuration patcherModulesConfig;
     private @Nullable TaskProvider<SlimeLauncherMetadata> metadataTask;
+    private final Set<String> mavenizerResolutionConfigurations = new HashSet<>();
 
     // Access Transformers
     private final ConfigurableFileCollection accessTransformer = this.getObjects().fileCollection();
@@ -238,6 +242,8 @@ abstract class MinecraftDependencyImpl implements MinecraftDependencyInternal {
     @Override
     public void handle(Configuration configuration) {
         if (configuration.isCanBeResolved()) {
+            configureMavenizerResolution(configuration);
+
             var moduleSelector = "%s:%s".formatted(this.module.get(), this.version.get());
             var resolutionStrategy = configuration.getResolutionStrategy();
             var dependencySubstitution = resolutionStrategy.getDependencySubstitution();
@@ -250,8 +256,8 @@ abstract class MinecraftDependencyImpl implements MinecraftDependencyInternal {
                     dependencySubstitution
                         .substitute(module)
                         .using(dependencySubstitution.variant(module, variant -> variant.attributes(attributes -> {
-                            attributes.attributeProvider(ForgeAttributes.MappingsChannel.ATTRIBUTE, instance.getMappingChannel());
-                            attributes.attributeProvider(ForgeAttributes.MappingsVersion.ATTRIBUTE, instance.getMappingVersion());
+                            attributes.attributeProvider(ForgeAttributes.MappingsChannel.ATTRIBUTE, getMappingChannel(instance));
+                            attributes.attributeProvider(ForgeAttributes.MappingsVersion.ATTRIBUTE, getMappingVersion(instance));
                         })))
                         .because("Accounts for declared mappings.");
                 } catch (InvalidUserCodeException e) {
@@ -273,6 +279,44 @@ abstract class MinecraftDependencyImpl implements MinecraftDependencyInternal {
         });
 
         finalizeAccessTransformers(sourceSets);
+    }
+
+    private Provider<String> getMappingChannel(MavenizerInstanceImpl instance) {
+        return this.mappings.flatMap(mappings -> "auto".equals(mappings.getChannel())
+            ? getProject().provider(() -> "official")
+            : getProject().provider(mappings::getChannel));
+    }
+
+    private Provider<String> getMappingVersion(MavenizerInstanceImpl instance) {
+        return this.mappings.flatMap(mappings -> {
+            var version = mappings.getVersion();
+            if ("auto".equals(mappings.getChannel()))
+                return this.version.flatMap(dependencyVersion -> {
+                    var minecraftVersion = minecraftVersionFromDependencyVersion(dependencyVersion);
+                    return minecraftVersion.isBlank()
+                        ? instance.getMappingVersion()
+                        : getProject().provider(() -> minecraftVersion);
+                });
+
+            return version == null
+                ? instance.getMappingVersion()
+                : getProject().provider(() -> version);
+        });
+    }
+
+    private static String minecraftVersionFromDependencyVersion(String version) {
+        var index = version.indexOf('-');
+        return index < 0 ? version : version.substring(0, index);
+    }
+
+    private void configureMavenizerResolution(Configuration configuration) {
+        if (!this.mavenizerResolutionConfigurations.add(configuration.getName()))
+            return;
+
+        configuration.getIncoming().beforeResolve(dependencies -> {
+            if (!this.getProject().getGradle().getStartParameter().isDryRun())
+                this.getMavenizerInstance().ensureGenerated();
+        });
     }
 
     void finalizeAccessTransformers(NamedDomainObjectSet<SourceSet> sourceSets) {

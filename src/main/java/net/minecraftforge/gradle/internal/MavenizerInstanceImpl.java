@@ -7,10 +7,12 @@ package net.minecraftforge.gradle.internal;
 import groovy.json.JsonSlurper;
 import net.minecraftforge.gradle.MavenizerInstance;
 import org.gradle.api.artifacts.ExternalModuleDependency;
+import org.gradle.api.file.RegularFile;
 import org.gradle.api.logging.Logger;
 import org.gradle.api.logging.Logging;
 import org.gradle.api.provider.MapProperty;
 import org.gradle.api.provider.Provider;
+import org.gradle.api.tasks.TaskProvider;
 import org.jspecify.annotations.Nullable;
 
 import java.io.File;
@@ -22,8 +24,9 @@ class MavenizerInstanceImpl implements MavenizerInstance {
     private final MinecraftExtensionImpl.ForProjectImpl extension;
     private final ForgeGradleProblems problems;
     private final Provider<Boolean> valueSource;
+    private final TaskProvider<MavenizerTask> task;
     private final ExternalModuleDependency dependency;
-    private final File jsonFile;
+    private final Provider<RegularFile> jsonFile;
 
     private final MapProperty<String, String> invoke;
     private @Nullable Map<String, String> map;
@@ -31,13 +34,15 @@ class MavenizerInstanceImpl implements MavenizerInstance {
     MavenizerInstanceImpl(
         MinecraftExtensionImpl.ForProjectImpl extension,
         Provider<Boolean> valueSource,
+        TaskProvider<MavenizerTask> task,
         ExternalModuleDependency dependency,
-        File jsonFile
+        Provider<RegularFile> jsonFile
     ) {
         this.extension = extension;
         this.problems = this.extension.getObjects().newInstance(ForgeGradleProblems.class);
         this.dependency = dependency;
         this.valueSource = valueSource;
+        this.task = task;
         this.jsonFile = jsonFile;
         this.invoke = this.extension.getObjects().mapProperty(String.class, String.class)
             .convention(this.extension.getProviders().provider(this::invoke));
@@ -46,8 +51,10 @@ class MavenizerInstanceImpl implements MavenizerInstance {
     @SuppressWarnings("unchecked")
     private Map<String, String> invoke() {
         if (this.map == null) {
-            valueSource.get(); // Execute Mavenizer, probably called before, but just be sure.
-            this.map = validate((Map<String, String>) new JsonSlurper().parse(this.jsonFile, "UTF-8"));
+            var file = this.jsonFile.get().getAsFile();
+            if (!file.isFile())
+                valueSource.get(); // Fallback for direct provider reads and auto mappings.
+            this.map = validate((Map<String, String>) new JsonSlurper().parse(file, "UTF-8"));
             //this.map.forEach((k, v) -> this.extension.getProject().getLogger().lifecycle(k + " => " + v));
         }
         return this.map;
@@ -99,6 +106,14 @@ class MavenizerInstanceImpl implements MavenizerInstance {
             }));
     }
 
+    void ensureGenerated() {
+        synchronized (this) {
+            var file = this.jsonFile.get().getAsFile();
+            if (!file.isFile())
+                valueSource.get();
+        }
+    }
+
     private Provider<String> get(String key, @Nullable String _default, String requiredVersion) {
         return this.invoke.getting(key)
             .orElse(this.extension.getProviders().provider(() -> {
@@ -115,7 +130,12 @@ class MavenizerInstanceImpl implements MavenizerInstance {
 
     @Override
     public Provider<ExternalModuleDependency> asProvider() {
-        return this.invoke.map(m -> this.dependency);
+        // The dependency notation is already known; Mavenizer-backed metadata providers trigger generation during resolution.
+        return this.extension.getProviders().provider(() -> this.dependency);
+    }
+
+    TaskProvider<MavenizerTask> getTaskProvider() {
+        return this.task;
     }
 
     @Override
@@ -138,6 +158,10 @@ class MavenizerInstanceImpl implements MavenizerInstance {
         return get("mappings.srg.file").map(this.extension.getProject()::file);
     }
 
+    Provider<File> getToSrgFileWhenObfuscated() {
+        return getWhenObfuscated(getToSrgFile());
+    }
+
     @Override
     public Provider<String> getToObf() {
         return get("mappings.obf.artifact");
@@ -148,6 +172,10 @@ class MavenizerInstanceImpl implements MavenizerInstance {
         return get("mappings.obf.file").map(this.extension.getProject()::file);
     }
 
+    Provider<File> getToObfFileWhenObfuscated() {
+        return getWhenObfuscated(getToObfFile());
+    }
+
     @Override
     public Provider<String> getMinecraftVersion() {
         return get("mc.version", "UNKNOWN", "0.4.33");
@@ -156,6 +184,12 @@ class MavenizerInstanceImpl implements MavenizerInstance {
     @Override
     public Provider<String> getMCPVersion() {
         return get("mcp.version", "UNKNOWN", "0.4.33");
+    }
+
+    private Provider<File> getWhenObfuscated(Provider<File> provider) {
+        return getMinecraftVersion().flatMap(version -> Util.isObfuscated(version)
+            ? provider
+            : this.extension.getProviders().provider(() -> (File)null));
     }
 
     // Internal, not sure if I want to return

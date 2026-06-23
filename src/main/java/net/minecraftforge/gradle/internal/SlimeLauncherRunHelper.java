@@ -140,7 +140,8 @@ class SlimeLauncherRunHelper {
     }
 
     static void configure(SlimeLauncherRunTask task, MinecraftDependencyInternal mcdep, FileCollection runtimeClasspath) {
-        var inst = mcdep.getMavenizerInstance();
+        var inst = (MavenizerInstanceImpl)mcdep.getMavenizerInstance();
+        task.dependsOn(inst.getTaskProvider());
         task.getRuntimeClasspath().setFrom(runtimeClasspath); // main classpath gets polluted by Slimelauncher so keep a copy
         task.getMinecraftClasspath().setFrom(mcdep.getMinecraftDependencies());
         task.getPatcherModules().setFrom(mcdep.getPatcherModules());
@@ -148,10 +149,7 @@ class SlimeLauncherRunHelper {
         task.getMCPVersion().set(inst.getMCPVersion());
         task.getMappingChannel().set(inst.getMappingChannel());
         task.getMappingVersion().set(inst.getMappingVersion());
-
-        if (Util.isObfuscated(inst.getMinecraftVersion().get())) {
-            task.getMcpToObf().fileProvider(inst.getToObfFile());
-            task.getMcpToSrg().fileProvider(inst.getToSrgFile());
-        }
+        task.getMcpToObf().fileProvider(inst.getToObfFileWhenObfuscated());
+        task.getMcpToSrg().fileProvider(inst.getToSrgFileWhenObfuscated());
     }
 }
